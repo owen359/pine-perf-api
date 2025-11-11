@@ -1,0 +1,64 @@
+export default async function handler(req, res) {
+  const ORIGIN = req.headers.origin || '';
+  const ALLOWED = [
+    'https://pinedesignmarketing.com',
+    'https://www.pinedesignmarketing.com',
+    'http://localhost:3000'
+  ];
+  if (ALLOWED.includes(ORIGIN)) {
+    res.setHeader('Access-Control-Allow-Origin', ORIGIN);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  try {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Use POST { url }' });
+    }
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ error: 'Missing url' });
+
+    const key = process.env.PSI_KEY;
+    const psiURL = new URL('https://www.googleapis.com/pagespeedonline/v5/runPagespeed');
+    psiURL.searchParams.set('url', url);
+    psiURL.searchParams.set('key', key);
+    psiURL.searchParams.set('strategy', 'mobile');
+
+    const r = await fetch(psiURL);
+    if (!r.ok) return res.status(r.status).json({ error: 'PSI error', detail: await r.text() });
+    const data = await r.json();
+
+    const lr = data.lighthouseResult || {};
+    const audits = lr.audits || {};
+    const cats = lr.categories || {};
+    const score = Math.round((cats.performance?.score ?? 0) * 100);
+    const lcp = audits['largest-contentful-paint']?.numericValue / 1000 || null;
+    const cls = audits['cumulative-layout-shift']?.numericValue ?? null;
+    const inp = audits['experimental-interaction-to-next-paint']?.numericValue ?? audits['max-potential-fid']?.numericValue ?? null;
+    const reqs = audits['network-requests']?.details?.items?.length ?? null;
+    const bytes = audits['total-byte-weight']?.numericValue ?? null;
+    const pageSizeMB = bytes ? bytes / (1024 * 1024) : null;
+    const loadTimeS = audits['speed-index']?.numericValue / 1000 ?? null;
+
+    const issues = [];
+    const addIssue = (key, label, grade) => issues.push({ key, label, grade });
+    if (reqs > 90) addIssue('http_requests', 'Make fewer HTTP requests', 'F');
+    else if (reqs > 60) addIssue('http_requests', 'Make fewer HTTP requests', 'D');
+    else if (reqs > 40) addIssue('http_requests', 'Make fewer HTTP requests', 'C');
+    else addIssue('http_requests', 'Make fewer HTTP requests', 'B');
+
+    addIssue('expires_headers', 'Add Expires headers', 'C');
+    addIssue('gzip', 'Compress components with gzip', 'B');
+    addIssue('dns', 'Reduce DNS lookups', 'B');
+    addIssue('redirects', 'Avoid URL redirects', 'B');
+    addIssue('cookies', 'Use cookie-free domains', 'A');
+    addIssue('empty_src', 'Avoid empty src or href', 'A');
+
+    return res.status(200).json({ score, lcp, cls, inp, requests: reqs, pageSizeMB, loadTimeS, issues });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Server error', detail: e?.message });
+  }
+}
